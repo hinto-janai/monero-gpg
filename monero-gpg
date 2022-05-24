@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+##########################################
+##       monero-gpg configuration       ##
+##--------------------------------------##
+## uncomment/edit these variables to    ##
+## configure monero-gpg to your liking. ##
+##########################################
+## use wget or curl?
+wget=true
+#curl=true
+
+## daemon rpc ip/port
+ip="localhost:18081"
+
+##########################################
+#        BEGIN MONERO-GPG SCRIPT         #
+##########################################
+# bold color
+readonly bred="\033[1;31m"
+readonly bgreen="\033[1;32m"
+readonly off="\033[0;0m"
+
+# curl/wget checks
+if [[ $curl = true ]]; then
+	if ! hash curl; then
+		printf "${bred}monero-gpg: ${off}%s\n" "curl not found"
+		exit 1
+	fi
+else
+	if ! hash wget; then
+		printf "${bred}monero-gpg: ${off}%s\n" "wget not found"
+		exit 1
+	fi
+fi
+
+# file/input checks
+if [[ $# = 0 || $# -gt 2 ]]; then
+	printf "${bred}%s${off}%s\n" "monero-gpg usage: " "monero-gpg <file> [ip]"
+	exit 2
+elif [[ ! -f $1 ]]; then
+	printf "${bred}monero-gpg: ${off}%s\n" "$1 not found"
+	exit 1
+fi
+
+# option checks
+if [[ -n $2 && $2 = *:* ]]; then
+	ip="$2"
+elif [[ -n $2 && $2 != *:* ]]; then
+	printf "${bred}%s${off}%s\n" "monero-gpg: " "input error"
+	printf "${bred}%s${off}%s\n" "monero-gpg usage: " "monero-gpg <file> [ip]"
+	exit 1
+fi
+
+# get output of monero rpc call "get_last_block_header"
+if [[ $curl = true ]]; then
+	if ! output=$(curl -sd '{"jsonrpc":"2.0","id":"0","method":"get_last_block_header"}' "$ip/json_rpc"); then
+		printf "${bred}monero-gpg: ${off}%s\n" "curl error"
+		exit 1
+	fi
+else
+	if ! output=$(wget -qO- "$ip/json_rpc" --header='Content-Type:application/json' --post-data='{"jsonrpc":"2.0","id":"0","method":"get_last_block_header"}'); then
+		printf "${bred}monero-gpg: ${off}%s\n" "wget error"
+		exit 1
+	fi
+fi
+
+# monero block info variables
+height=$(echo "$output" | grep "\"height\"" | awk '{print $2}' | tr -d '":, ')
+unix=$(echo "$output" | grep "\"timestamp\"" | awk '{print $2}' | tr -d '":, ')
+hash=$(echo "$output" | grep "\"hash\"" | awk '{print $2}' | tr -d '":, ')
+timezone=$(date -u -d @"${unix}")
+newline=$'\n'
+
+# if signature file already exists, ask to overwrite
+if [[ -e "${1}.asc" ]]; then
+	printf "${bred}monero-gpg: ${off}%s" "${1}.asc already exists, overwrite? (y/N) "
+	read yn
+	case "$yn" in
+		y|Y|yes|Yes|YES) :;;
+		*) printf "${bred}monero-gpg: ${off}%s\n" "exiting..."; exit 1;;
+	esac
+fi
+
+# what file type?
+file=$(file "$1" | cut -d' ' -f2-)
+if [[ $file != *"ASCII"* && $file != *"ascii"* ]]; then
+	printf "${bred}monero-gpg: ${off}%s\n" "non-text file detected, signing sha256 hash of $1"
+	if ! text=$(sha256sum "$1"); then
+		printf "${bred}%s${off}%s\n" "monero-gpg: " "sha256sum error"
+		exit 1
+	fi
+else
+	text="$(cat "$1")"
+fi
+
+# user message into variable
+msg=$(cat << EOM
+$text
+
+=== monero info ===
+[ height ] $height
+[  time  ] $timezone
+[  hash  ] $hash
+EOM
+)
+
+# sign message
+if ! echo "$msg" | gpg --clearsign > "${1}.asc"; then
+	printf "${bred}monero-gpg: ${off}%s\n" "could not sign with gpg"
+	exit 1
+fi
+
+# signature verification
+if gpg --verify "${1}.asc"; then
+	printf "${bgreen}[ OK ] ${off}%s\n" "${1}.asc"
+	exit 0
+else
+	printf "${bgreen}[ERROR] ${off}%s\n" "${1}.asc"
+	exit 1
+fi
